@@ -1,0 +1,11 @@
+# Pinned for possession_v4 (frame classifier). starter/frame_model.pkl is tied to this
+# scikit-learn version; frame_model.load() refuses to run with another one.
+# Tested with Python 3.14.
+numpy==2.5.4
+pandas==3.1.1
+scikit-learn==1.9.1
+scipy==1.18.1
+joblib==1.6.0
+threadpoolctl==3.8.0
+# only for tools/train_frame_model.py (sample game 3 is in EPTS format)
+kloppy

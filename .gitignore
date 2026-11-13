@@ -66,3 +66,6 @@ ball.npz
 ball.npz
 .venv/
 tracking_v2.npz
+
+# parsed tracking caches are derived match data: never commit
+*.npz
