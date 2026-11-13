@@ -65,3 +65,4 @@ env/
 ball.npz
 ball.npz
 .venv/
+tracking_v2.npz
