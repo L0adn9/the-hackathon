@@ -168,6 +168,47 @@ def degrade(ball, players, rng, graded, target=0.41):
     return ball.astype(np.float32), players.astype(np.float32), speed.astype(np.float32)
 
 
+def fill_dead_ball(ball, truth, hold=50):
+    """Give the ball a position where the sample data has none.
+
+    The sample games blank the ball during most stoppages (81-98% of dead frames, against 6-12%
+    of alive frames), so on the plain degradation above "ball missing" almost means "dead ball".
+    The competition ATD is not like that (we measured ~71% missing in the 5 s before tagged set
+    pieces and ~19% inside attacking phases). Here the ball moves in a straight line from where
+    it was last seen to where it is next seen, and sits still on the restart spot for the last
+    `hold` frames of each stoppage.
+    """
+    out = ball.astype(np.float64).copy()
+    known = np.flatnonzero(~np.isnan(out[:, 0]))
+    pos = np.arange(len(out))
+    for k in (0, 1):
+        out[:, k] = np.interp(pos, known, out[known, k])
+    dead = truth == D
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], dead.astype(int), [0]))))
+    for s, e in zip(edges[0::2], edges[1::2]):
+        h = min(hold, e - s)
+        out[e - h:e] = out[min(e, len(out) - 1)]
+    return out
+
+
+def degrade_realistic(ball, players, rng, truth, dead_miss=0.70, alive_miss=0.25):
+    """Like degrade(), but the ball goes missing at competition-like rates by state:
+    ~70% of dead frames and ~25% of alive frames, in long bursts (~16 s dead, ~6 s alive)."""
+    n, slots = players.shape[:2]
+    graded = truth != X
+    full = fill_dead_ball(ball, truth) + rng.normal(0, 0.3, (n, 2))
+    missing = bursts(n, rng, dead_miss, 400) & graded & (truth == D)
+    alive = truth < D
+    already = np.isnan(ball[:, 0]) & alive
+    extra = max(0.0, (alive_miss - already[alive].mean()) / (1 - already[alive].mean()))
+    missing |= (bursts(n, rng, extra, 150) & graded & alive) | already
+    full[missing] = np.nan
+    players = players + rng.normal(0, 0.2, players.shape)
+    for k in range(slots):
+        players[bursts(n, rng, 0.07, 50), k] = np.nan
+    return full.astype(np.float32), players.astype(np.float32)
+
+
 # ------------------------------------------------------------------ pipelines
 
 def run_pipeline(v1, v2, ball, players, speed, team, blocks, p1, p2, use_speed):

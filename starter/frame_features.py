@@ -73,7 +73,86 @@ def _player_speeds(players, fps, half=12):
     return np.where(speed > 12.0, np.nan, speed)  # identity switches make impossible jumps
 
 
-def features(ball, players, team, blocks, pitch, fps=25):
+def _fill_forward(values, seen):
+    """Value at the last seen frame, carried forward (NaN before the first one)."""
+    idx = np.where(seen, np.arange(len(seen)), -1)
+    last = np.maximum.accumulate(idx)
+    out = np.full(len(seen), np.nan)
+    ok = last >= 0
+    out[ok] = values[last[ok]]
+    return out
+
+
+def _fill_backward(values, seen):
+    return _fill_forward(values[::-1], seen[::-1])[::-1]
+
+
+def _run_since(flag):
+    """Frames since `flag` was last True (capped); CAP before the first one."""
+    return _frames_since(flag)
+
+
+def dead_ball_features(ball, players, pitch, fps=25):
+    """Ball-centred stoppage cues: where the ball was when it vanished and where it reappears,
+    whether it was heading out, whether it sits still on a restart spot, and whether a kick
+    follows. Team-free, so the same for both points of view."""
+    length, width = pitch
+    seen = ~np.isnan(ball[:, 0])
+    x, y = ball[:, 0], ball[:, 1]
+
+    to_line = np.minimum(np.minimum(x, length - x), np.minimum(y, width - y))
+    # velocity over 0.4 s on raw observations, and its component towards the nearest line
+    vx = np.full(len(x), np.nan)
+    vy = np.full(len(x), np.nan)
+    vx[5:] = (x[5:] - x[:-5]) * fps / 5.0
+    vy[5:] = (y[5:] - y[:-5]) * fps / 5.0
+    speed = np.sqrt(vx ** 2 + vy ** 2)
+    cand = np.stack([-vx, vx, -vy, vy], axis=1)                       # towards x=0, x=L, y=0, y=W
+    dist = np.stack([x, length - x, y, width - y], axis=1)
+    with np.errstate(invalid="ignore"):
+        nearest = np.argmin(np.where(np.isnan(dist), np.inf, dist), axis=1)
+    heading_out = cand[np.arange(len(x)), nearest]
+    ok = seen & ~np.isnan(speed)
+
+    with np.errstate(invalid="ignore"):
+        corner = np.sqrt(np.minimum(x, length - x) ** 2 + np.minimum(y, width - y) ** 2)
+        centre = np.sqrt((x - length / 2) ** 2 + (y - width / 2) ** 2)
+        goal_area = np.sqrt(np.maximum(np.minimum(x, length - x) - 5.5, 0) ** 2
+                            + np.maximum(np.abs(y - width / 2) - 9.16, 0) ** 2)
+        still = ok & (speed < 0.8)
+        moving = ok & (speed > 2.0)
+        kick = ok & (speed > 8.0)
+
+    # players 8-11 m from the ball: a wall or the players kept away at a restart
+    delta = players - np.nan_to_num(ball)[:, None, :]
+    pd = np.sqrt((delta ** 2).sum(-1))
+    with np.errstate(invalid="ignore"):
+        ring = ((pd > 8.0) & (pd < 11.0)).sum(1).astype(float)
+        close = (pd < 3.0).sum(1).astype(float)
+    ring[~seen] = np.nan
+    close[~seen] = np.nan
+
+    cols = [
+        _fill_forward(to_line, seen), _fill_backward(to_line, seen),
+        _fill_forward(np.where(ok, heading_out, np.nan), ok),
+        _fill_forward(np.where(ok, speed, np.nan), ok), _fill_backward(np.where(ok, speed, np.nan), ok),
+        _fill_forward(corner, seen), _fill_backward(corner, seen),
+        _fill_forward(centre, seen), _fill_backward(centre, seen),
+        _fill_forward(goal_area, seen), _fill_backward(goal_area, seen),
+        np.minimum(_run_since(moving), CAP), _frames_since(kick[::-1])[::-1],
+        _window_mean(still.astype(float), 50, 50),
+        ring, _window_mean(ring, 50, 50), close, _window_mean(close, 25, 25),
+    ]
+    return cols
+
+
+DEAD_NAMES = ["last_to_line", "next_to_line", "last_heading_out", "last_speed", "next_speed",
+              "last_corner", "next_corner", "last_centre", "next_centre", "last_goal_area",
+              "next_goal_area", "still_for", "until_kick", "still_share_2s", "ring_8_11",
+              "ring_8_11_4s", "close_3", "close_3_2s"]
+
+
+def features(ball, players, team, blocks, pitch, fps=25, dead_cues=True):
     """(n, k) float matrix of features, NaN where undefined. Names in feature_names()."""
     length, width = pitch
     n = len(ball)
@@ -134,10 +213,14 @@ def features(ball, players, team, blocks, pitch, fps=25):
                  _window_mean(speed, w, w), _window_mean(outside, w, w),
                  _window_mean(seen.astype(float), w, w)]
     cols += [shape[:, j] for j in range(shape.shape[1])]
+    if dead_cues:
+        crowd_past = _window_mean(crowd, 75, 0)
+        crowd_next = _window_mean(crowd, 0, 75)
+        cols += dead_ball_features(ball, players, pitch, fps) + [crowd_past, crowd_next]
     return np.column_stack(cols).astype(np.float32)
 
 
-def feature_names():
+def feature_names(dead_cues=True):
     names = ["home_d1", "home_d2", "away_d1", "away_d2", "home_n5", "away_n5", "home_n10",
              "away_n10", "adv", "control", "ball_speed", "ball_x_att", "ball_vx_att",
              "outside", "to_side", "to_end", "ball_known", "ball_seen", "since_seen",
@@ -147,4 +230,6 @@ def feature_names():
                   "control_next{}".format(w), "ball_speed_{}".format(w),
                   "outside_{}".format(w), "seen_share_{}".format(w)]
     names += ["shape_vx", "shape_len", "shape_wid", "shape_area", "shape_terr"]
+    if dead_cues:
+        names += DEAD_NAMES + ["crowd_speed_past3", "crowd_speed_next3"]
     return names
